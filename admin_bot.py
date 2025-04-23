@@ -1,59 +1,74 @@
-from aiogram import Bot, Dispatcher, executor, types
-from config import ADMIN_BOT_TOKEN, ADMIN_IDS
-from db import get_users, update_users
-from utils import format_number
+import telebot
+import random
+import time
+from config import BOT_TOKEN_MAIN
+from utils import format_number, get_users, update_users
 
-bot = Bot(token=ADMIN_BOT_TOKEN)
-dp = Dispatcher(bot)
+bot = telebot.TeleBot(BOT_TOKEN_MAIN)
+users = get_users()
+bets = {}
+lock = False
 
-@dp.message_handler(commands=["start"])
-async def start(msg: types.Message):
-    if msg.from_user.id not in ADMIN_IDS:
-        return await msg.reply("Bạn không có quyền.")
-    await msg.reply("Chào admin! Dùng lệnh: /cong, /tru, /reset, /xoa, /code")
+@bot.message_handler(commands=['start'])
+def start(msg):
+    bot.reply_to(msg, "Gửi tin nhắn dạng: T 1000 hoặc X 5000 để cược!")
 
-@dp.message_handler(commands=["cong"])
-async def cong(msg: types.Message):
-    if msg.from_user.id not in ADMIN_IDS: return
+@bot.message_handler(func=lambda m: True)
+def handle_bet(msg):
+    global lock
+    uid = str(msg.from_user.id)
     try:
-        _, username, amount = msg.text.split()
-        amount = int(amount)
-        users = get_users()
-        for uid, u in users.items():
-            if u.get("username") == username or uid == username:
-                u["balance"] += amount
-                update_users(users)
-                return await msg.reply(f"✅ Đã cộng {format_number(amount)} xu cho {username}")
-        await msg.reply("Không tìm thấy user.")
-    except:
-        await msg.reply("Cú pháp: /cong @user 10000")
+        if lock:
+            return bot.reply_to(msg, "Đã khóa cược, chờ ván tiếp theo!")
 
-@dp.message_handler(commands=["reset"])
-async def reset(msg: types.Message):
-    if msg.from_user.id not in ADMIN_IDS: return
-    try:
-        _, uid = msg.text.split()
-        users = get_users()
-        if uid in users:
-            users[uid]["balance"] = 10000
-            update_users(users)
-            await msg.reply("Đã reset tài khoản.")
-        else:
-            await msg.reply("Không tìm thấy user.")
-    except:
-        await msg.reply("Cú pháp: /reset user_id")
+        cmd, amt = msg.text.upper().split()
+        amt = int(amt)
+        if cmd not in ["T", "X", "C", "L"]:
+            return bot.reply_to(msg, "Sai cú pháp! Dùng T/X/C/L + số xu")
 
-@dp.message_handler(commands=["xoa"])
-async def xoa(msg: types.Message):
-    if msg.from_user.id not in ADMIN_IDS: return
-    try:
-        _, uid = msg.text.split()
-        users = get_users()
-        if uid in users:
-            del users[uid]
-            update_users(users)
-            await msg.reply("Đã xoá tài khoản.")
-        else:
-            await msg.reply("Không tìm thấy user.")
+        if uid not in users:
+            users[uid] = {"balance": 10000}
+
+        if users[uid]["balance"] < amt:
+            return bot.reply_to(msg, "Bạn không đủ xu!")
+
+        users[uid]["balance"] -= amt
+        bets.setdefault(cmd, []).append((uid, amt))
+        update_users(users)
+        bot.reply_to(msg, f"✅ Đã cược {cmd} {format_number(amt)} xu")
     except:
-        await msg.reply("Cú pháp: /xoa user_id")
+        bot.reply_to(msg, "Sai cú pháp. Dùng: T 1000 hoặc X 2000")
+
+def play_round():
+    global lock, bets
+    while True:
+        print("⏳ Đang mở cược...")
+        lock = False
+        bets = {}
+        time.sleep(20)
+
+        lock = True
+        dice = [random.randint(1, 6) for _ in range(3)]
+        total = sum(dice)
+        result = []
+        if total <= 10: result.append("X")
+        if total >= 11: result.append("T")
+        if total in [4, 6, 8]: result.append("C")
+        if total in [3, 5, 7]: result.append("L")
+
+        win_msg = f"🎲 Kết quả: {dice[0]}-{dice[1]}-{dice[2]} = {total}\n"
+
+        for k, lst in bets.items():
+            for uid, amt in lst:
+                if k in result:
+                    users[uid]["balance"] += amt * 2
+                    win_msg += f"💰 {uid} thắng {format_number(amt)} xu\n"
+
+        update_users(users)
+        bot.send_message(msg.chat.id, win_msg)
+        time.sleep(5)
+
+import threading
+threading.Thread(target=play_round, daemon=True).start()
+
+bot.polling()
